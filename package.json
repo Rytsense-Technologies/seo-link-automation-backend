@@ -1,0 +1,41 @@
+{
+  "name": "seo-link-automation-backend",
+  "version": "0.1.0",
+  "description": "SEO link automation backend (Node.js/Fastify port of the Python/FastAPI reference)",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "vitest run --project unit",
+    "test:watch": "vitest --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:all": "vitest run",
+    "lint": "eslint .",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/swagger": "^9.9.0",
+    "@fastify/swagger-ui": "^6.1.1",
+    "cheerio": "^1.2.0",
+    "dotenv": "^18.0.2",
+    "entities": "^8.1.0",
+    "fast-xml-parser": "^5.11.1",
+    "fastify": "^5.12.5",
+    "htmlparser2": "^10.1.0",
+    "pg": "^8.23.0",
+    "pino": "^10.3.1",
+    "undici": "^8.11.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "vitest": "^5.0.1"
+  }
+}

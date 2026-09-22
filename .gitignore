@@ -7,3 +7,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Node.js
+node_modules/
+coverage/

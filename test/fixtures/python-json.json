@@ -1,0 +1,443 @@
+{
+"python": "3.14.6",
+"cases": [
+{
+"input": "{bad",
+"error": "Expecting property name enclosed in double quotes",
+"pos": 1
+},
+{
+"input": "{",
+"error": "Expecting property name enclosed in double quotes",
+"pos": 1
+},
+{
+"input": "}",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "[",
+"error": "Expecting value",
+"pos": 1
+},
+{
+"input": "]",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": " ",
+"error": "Expecting value",
+"pos": 1
+},
+{
+"input": "x",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "nul",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "nulll",
+"error": "Extra data",
+"pos": 4
+},
+{
+"input": "tru",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "True",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "None",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "{\"a\":}",
+"error": "Expecting value",
+"pos": 5
+},
+{
+"input": "{\"a\" 1}",
+"error": "Expecting ':' delimiter",
+"pos": 5
+},
+{
+"input": "{\"a\":1,}",
+"error": "Illegal trailing comma before end of object",
+"pos": 6
+},
+{
+"input": "[1,]",
+"error": "Illegal trailing comma before end of array",
+"pos": 2
+},
+{
+"input": "[1 2]",
+"error": "Expecting ',' delimiter",
+"pos": 3
+},
+{
+"input": "{\"a\":1 \"b\":2}",
+"error": "Expecting ',' delimiter",
+"pos": 7
+},
+{
+"input": "{\"a\":1}}",
+"error": "Extra data",
+"pos": 7
+},
+{
+"input": "{\"a\":1} x",
+"error": "Extra data",
+"pos": 8
+},
+{
+"input": "[1]]",
+"error": "Extra data",
+"pos": 3
+},
+{
+"input": "\"abc",
+"error": "Unterminated string starting at",
+"pos": 0
+},
+{
+"input": "\"a\\x\"",
+"error": "Invalid \\escape",
+"pos": 2
+},
+{
+"input": "\"\\u12\"",
+"error": "Invalid \\uXXXX escape",
+"pos": 2
+},
+{
+"input": "\"\\u12zz\"",
+"error": "Invalid \\uXXXX escape",
+"pos": 2
+},
+{
+"input": "\"a\nb\"",
+"error": "Invalid control character at",
+"pos": 2
+},
+{
+"input": "\"a\tb\"",
+"error": "Invalid control character at",
+"pos": 2
+},
+{
+"input": "{\"a\":\"\u0001\"}",
+"error": "Invalid control character at",
+"pos": 6
+},
+{
+"input": "{'a':1}",
+"error": "Expecting property name enclosed in double quotes",
+"pos": 1
+},
+{
+"input": "{a:1}",
+"error": "Expecting property name enclosed in double quotes",
+"pos": 1
+},
+{
+"input": "01",
+"error": "Extra data",
+"pos": 1
+},
+{
+"input": "-",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "-a",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "1.",
+"error": "Extra data",
+"pos": 1
+},
+{
+"input": ".5",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "1e",
+"error": "Extra data",
+"pos": 1
+},
+{
+"input": "1e+",
+"error": "Extra data",
+"pos": 1
+},
+{
+"input": "+1",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "0x10",
+"error": "Extra data",
+"pos": 1
+},
+{
+"input": "NaN",
+"ok": {
+"$float": "nan"
+}
+},
+{
+"input": "Infinity",
+"ok": {
+"$float": "inf"
+}
+},
+{
+"input": "-Infinity",
+"ok": {
+"$float": "-inf"
+}
+},
+{
+"input": "[NaN, 1]",
+"ok": [
+{
+"$float": "nan"
+},
+1
+]
+},
+{
+"input": "{\"a\": -Infinity}",
+"ok": {
+"a": {
+"$float": "-inf"
+}
+}
+},
+{
+"input": "nan",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "1 2",
+"error": "Extra data",
+"pos": 2
+},
+{
+"input": "{\"a\":1,\"a\":2}",
+"ok": {
+"a": 2
+}
+},
+{
+"input": "\"\\ud800\"",
+"ok": "\ud800"
+},
+{
+"input": "[1,,2]",
+"error": "Expecting value",
+"pos": 3
+},
+{
+"input": "[,1]",
+"error": "Expecting value",
+"pos": 1
+},
+{
+"input": "{,}",
+"error": "Expecting property name enclosed in double quotes",
+"pos": 1
+},
+{
+"input": "{\"a\"",
+"error": "Expecting ':' delimiter",
+"pos": 4
+},
+{
+"input": "{\"a\":",
+"error": "Expecting value",
+"pos": 5
+},
+{
+"input": "{\"a\":1",
+"error": "Expecting ',' delimiter",
+"pos": 6
+},
+{
+"input": "[1",
+"error": "Expecting ',' delimiter",
+"pos": 2
+},
+{
+"input": "[1,",
+"error": "Expecting value",
+"pos": 3
+},
+{
+"input": "\"",
+"error": "Unterminated string starting at",
+"pos": 0
+},
+{
+"input": "\ufeff{\"a\":1}",
+"ok": {
+"a": 1
+}
+},
+{
+"input": "\ufeff",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "{\"\u00e9\":\"\u00fc\", \"x\": 1 y}",
+"error": "Expecting ',' delimiter",
+"pos": 17
+},
+{
+"input": "{\"\ud83d\ude00\": 1,}",
+"error": "Illegal trailing comma before end of object",
+"pos": 7
+},
+{
+"input": "[\" \ud83d\ude00 \", x]",
+"error": "Expecting value",
+"pos": 8
+},
+{
+"input": "   {\"a\": 1}   ",
+"ok": {
+"a": 1
+}
+},
+{
+"input": "\t\n[]\r\n",
+"ok": []
+},
+{
+"input": "{\"a\":[1,2,{\"b\":}]}",
+"error": "Expecting value",
+"pos": 15
+},
+{
+"input": "12345678901234567890123",
+"ok": {
+"$bigint": "12345678901234567890123"
+}
+},
+{
+"input": "1.5e400",
+"ok": {
+"$float": "inf"
+}
+},
+{
+"input": "-0",
+"ok": 0
+},
+{
+"input": "[1e5, -1.5E-3]",
+"ok": [
+100000.0,
+-0.0015
+]
+},
+{
+"input": "{\"a\":true,\"b\":false,\"c\":null}",
+"ok": {
+"a": true,
+"b": false,
+"c": null
+}
+},
+{
+"input": "{\"a\":tru}",
+"error": "Expecting value",
+"pos": 5
+},
+{
+"input": "{\"a\":nul}",
+"error": "Expecting value",
+"pos": 5
+},
+{
+"input": "\"\\/\"",
+"ok": "/"
+},
+{
+"input": "\"\\q\"",
+"error": "Invalid \\escape",
+"pos": 1
+},
+{
+"input": "\"\\",
+"error": "Unterminated string starting at",
+"pos": 0
+},
+{
+"input": "[1]\n",
+"ok": [
+1
+]
+},
+{
+"input": "[1] ",
+"ok": [
+1
+]
+},
+{
+"input": "{\"a\":1}\u0000",
+"error": "Extra data",
+"pos": 7
+},
+{
+"input": "\u0000",
+"error": "Expecting value",
+"pos": 0
+},
+{
+"input": "{\"a\":\"\\uD83D\\uDE00\"}",
+"ok": {
+"a": "\ud83d\ude00"
+}
+},
+{
+"input": "\"\u2028\"",
+"ok": "\u2028"
+},
+{
+"input": "[\u00a01]",
+"error": "Expecting value",
+"pos": 1
+},
+{
+"input": "[1\u3000]",
+"error": "Expecting ',' delimiter",
+"pos": 2
+}
+]
+}

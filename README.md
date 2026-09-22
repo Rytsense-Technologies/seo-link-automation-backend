@@ -1,5 +1,63 @@
 # SEO Link Automation – Backend
 
+Two implementations of the same API over the same PostgreSQL database:
+
+- **Node.js** (`src/`, `test/`): Fastify · pg · Swagger · Cheerio · undici · Vitest, in plain
+  JavaScript. It is a port of the Python backend with the same endpoints, status codes, error
+  envelope, validation rules, crawler/SSRF behaviour and interlink engine. See
+  `NODE_MIGRATION_NOTES.md` for the mapping, verified parity and known differences.
+- **Python** (`app/`, `tests/`, `alembic/`): FastAPI · Pydantic · SQLAlchemy 2 · Alembic. It is
+  the behavioural reference and is kept unchanged until Node is validated in production (see
+  `REFERENCE_PYTHON.md`).
+
+## Node.js
+
+Requires Node ≥ 22 and PostgreSQL. It reads the same `.env` as Python (`DATABASE_URL`,
+`AI_PROVIDER`, `AI_API_KEY`, `API_KEY`, `CRAWLER_*`, `INTERLINK_*`; see `.env.example`).
+Both `postgresql://` and SQLAlchemy-style `postgresql+psycopg://` URLs are accepted.
+
+```bash
+npm install
+npm run db:migrate      # empty DB only: creates the schema at Alembic revision 20260922_0001
+                        # (no-op if already at head; never alters an existing DB)
+npm start               # http://127.0.0.1:8000  (PORT / HOST env vars override)
+npm run dev             # same, restarting on file changes
+```
+
+API docs: Swagger UI at `/docs`, OpenAPI JSON at `/docs/json` and `/openapi.json`, ReDoc at `/redoc`.
+
+| Script | What it runs |
+|---|---|
+| `npm test` | unit + API tests (no DB, no network, AI providers faked) |
+| `npm run test:watch` | the same, in watch mode |
+| `npm run test:integration` | PostgreSQL tests. Needs `TEST_DATABASE_URL` (env or `.env`) pointing at a **disposable** database whose name contains `test`; it is migrated up and down |
+| `npm run test:all` | both |
+| `npm run lint` | ESLint |
+
+Node layout:
+
+```
+src/
+  app.js, server.js   Fastify app factory (error envelope, Starlette-style routing) and entry point
+  config/             settings from env/.env (same names, defaults and checks as app/core/config.py)
+  db/                 pg pool, page/site queries, Alembic-compatible migrate (migrations/*.sql)
+  routes/, schemas/   endpoints and their JSON schemas (Swagger + response serialisation)
+  plugins/            API key, CORS, Swagger, dependency wiring (overridable in tests)
+  content/            position-preserving HTML tokenizer, content store
+  crawler/            robots, sitemaps, SSRF-guarded fetcher, extraction, NEXT_REDIRECT/meta refresh
+  interlink/          filters, retrieval, AI providers + analyzer, anchor rules, applier, service
+  utils/              Python-compatible helpers: urllib.parse, str semantics, json.loads, Pydantic rules
+test/
+  unit/, api/         Vitest ports of tests/unit and tests/api, plus Pydantic/JSON parity suites
+  integration/        ports of tests/integration (PostgreSQL)
+  fixtures/           results recorded from the Python reference
+```
+
+The sections below describe the shared behaviour. Module names refer to the Python files; the
+Node equivalents live under `src/` with the same names in kebab-case.
+
+## Python (reference)
+
 Python · FastAPI · Pydantic · SQLAlchemy 2 · Alembic · PostgreSQL (administered with pgAdmin).
 
 ## Setup
