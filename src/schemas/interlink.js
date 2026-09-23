@@ -134,6 +134,23 @@ export const SuggestionRead = {
   required: Object.keys(suggestionReadProperties),
 };
 
+const suggestionListItemProperties = {
+  ...suggestionReadProperties,
+  target_url: {
+    type: 'string',
+    description: 'URL of the target page, from the join the listing already performs (no extra request needed)',
+    examples: ['https://rytsensetech.com/blog/enterprise-ai-chatbot-development-cost/'],
+  },
+};
+
+/** A listed suggestion: the read model plus the target page URL. */
+export const SuggestionListItem = {
+  $id: 'SuggestionListItem',
+  type: 'object',
+  properties: suggestionListItemProperties,
+  required: Object.keys(suggestionListItemProperties),
+};
+
 const detailProperties = {
   ...suggestionReadProperties,
   retrieval_score: { type: ['number', 'null'] },
@@ -206,7 +223,7 @@ export const SuggestionList = {
   $id: 'SuggestionList',
   type: 'object',
   properties: {
-    items: { type: 'array', items: { $ref: 'SuggestionRead#' } },
+    items: { type: 'array', items: { $ref: 'SuggestionListItem#' } },
     total: { type: 'integer' },
     page: { type: 'integer' },
     page_size: { type: 'integer' },
@@ -221,6 +238,6 @@ export const RejectRequest = {
 };
 
 export const interlinkSchemas = [
-  SuggestionStatus, AnalyzeRequest, SuggestionRead, SuggestionDetail, SkippedCandidate, ScoreSignals, CandidateScore,
-  AnalyzeResponse, SuggestionList, RejectRequest,
+  SuggestionStatus, AnalyzeRequest, SuggestionRead, SuggestionListItem, SuggestionDetail, SkippedCandidate, ScoreSignals,
+  CandidateScore, AnalyzeResponse, SuggestionList, RejectRequest,
 ];

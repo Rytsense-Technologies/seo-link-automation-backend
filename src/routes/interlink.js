@@ -26,6 +26,14 @@ export function toRead(s) {
   };
 }
 
+/**
+ * A listed suggestion. `target_page` comes from the join the listing query already performs, so
+ * the URL costs nothing extra and callers do not need a detail request per row.
+ */
+export function toListItem(s) {
+  return { ...toRead(s), target_url: s.target_page.url };
+}
+
 export function toDetail(s) {
   const summary = (p) => ({ id: p.id, url: p.url, title: p.title ?? null, h1: p.h1 ?? null });
   return {
@@ -122,7 +130,7 @@ Suggestions are always stored as PENDING for human review; no page content is ch
           min_relevance_score: q.min_relevance_score ?? null,
         };
         const [items, total] = await service.listSuggestions(filters, { page: q.page, pageSize: q.page_size });
-        return { items: items.map(toRead), total, page: q.page, page_size: q.page_size };
+        return { items: items.map(toListItem), total, page: q.page, page_size: q.page_size };
       }),
   );
 

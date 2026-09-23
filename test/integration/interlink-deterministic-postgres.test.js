@@ -102,6 +102,21 @@ describe.skipIf(!DB_URL)('interlink deterministic generation + PostgreSQL', () =
     expect(await pagesFingerprint(pool)).toBe(before);
   });
 
+  it('lists suggestions with the target URL taken from the pages table', async () => {
+    await analyze({ use_ai: false });
+    const listed = await app.inject({ method: 'GET', url: '/api/interlink/suggestions', query: { status: 'PENDING' } });
+    expect(listed.statusCode, listed.body).toBe(200);
+    const { items, total } = listed.json();
+    expect(total).toBeGreaterThan(0);
+
+    const { rows } = await pool.query('SELECT id, url FROM pages');
+    const urlById = new Map(rows.map((r) => [r.id, r.url]));
+    for (const item of items) {
+      expect(item.target_url).toBe(urlById.get(item.target_page_id));
+      expect(item.target_page_id).toBe(ids['/ai-voice-agent/']);
+    }
+  });
+
   it('schema is unchanged and constraints still protect the table', async () => {
     expect(await currentRevision(pool)).toBe(HEAD_REVISION);
     expect(HEAD_REVISION).toBe('20260922_0001');
