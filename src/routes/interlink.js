@@ -62,7 +62,20 @@ export default async function interlinkRoutes(app) {
 \`INTERLINK_CANDIDATE_POOL_SIZE\`), AI relevance scoring, anchor/context validation and the
 \`INTERLINK_MIN_RELEVANCE_SCORE\` threshold. New suggestions are stored as \`PENDING\`
 unless \`dry_run\` is true. Pairs that already have a PENDING/APPROVED/APPLIED suggestion,
-or were rejected within \`INTERLINK_REJECTION_COOLDOWN_DAYS\`, are not regenerated.`,
+or were rejected within \`INTERLINK_REJECTION_COOLDOWN_DAYS\`, are not regenerated.
+
+**Generation modes** (\`generation_mode\` in the response):
+- \`ai\` (default): the AI judges only the retrieved candidate pool. AI unavailable -> 503,
+  AI failure / invalid output -> 502.
+- \`deterministic\` (\`use_ai: false\`): no AI call. Targets are ranked by explainable signals
+  (see \`candidates[].signals\`), and a link is proposed only where a phrase from the target's
+  title/H1/keywords already appears in a source sentence (skip reason \`NO_ANCHOR_IN_SOURCE\`
+  otherwise). Threshold: \`INTERLINK_DETERMINISTIC_MIN_SCORE\` x 100 (or a higher
+  \`min_relevance_score\`).
+- \`deterministic_fallback\` (\`ai_fallback: true\`): as \`deterministic\`, used only when the AI
+  is not configured, fails, or returns invalid output; \`ai_error\` gives the reason. No retries.
+
+Suggestions are always stored as PENDING for human review; no page content is changed here.`,
         body: { $ref: 'AnalyzeRequest#' },
         response: { 200: { $ref: 'AnalyzeResponse#' }, ...ERROR_RESPONSES, ...AI_ERRORS },
       },

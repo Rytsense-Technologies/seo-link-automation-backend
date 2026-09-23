@@ -51,6 +51,8 @@ const FIELDS = {
   interlink_source_content_max_chars: ['int', 6000, { ge: 500 }],
   interlink_target_excerpt_chars: ['int', 300, { ge: 0 }],
   interlink_require_region_match: ['bool', true],
+  // Minimum 0-1 deterministic relevance score (use_ai=false or the ai_fallback path).
+  interlink_deterministic_min_score: ['float', 0.35, { ge: 0, le: 1 }],
   interlink_utility_page_types: ['list', ['utility', 'system', 'legal', 'auth', 'search', 'archive']],
   interlink_utility_path_patterns: ['list', DEFAULT_UTILITY_PATH_PATTERNS],
 

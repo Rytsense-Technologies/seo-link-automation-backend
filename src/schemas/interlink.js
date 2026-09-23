@@ -31,8 +31,77 @@ export const AnalyzeRequest = {
       description: 'Override INTERLINK_MIN_RELEVANCE_SCORE; cannot go below the configured value',
     },
     dry_run: { type: 'boolean', default: false, description: 'Return suggestions without storing them' },
+    use_ai: {
+      type: 'boolean',
+      default: true,
+      description:
+        'false = deterministic suggestions only (explainable lexical scoring; anchors are phrases that already ' +
+        'appear in the source). The AI provider is not called. min_relevance_score then defaults to ' +
+        'INTERLINK_DETERMINISTIC_MIN_SCORE x 100.',
+    },
+    ai_fallback: {
+      type: 'boolean',
+      default: false,
+      description:
+        'true = if the AI provider is not configured, fails or returns invalid output, return deterministic ' +
+        'suggestions (generation_mode "deterministic_fallback") instead of 503/502. Default false keeps 502/503.',
+    },
   },
   required: ['source_page_id'],
+  examples: [
+    { source_page_id: '3f2c8a4e-1b6d-4c1e-9a53-0d7f6b2e8c11', max_suggestions: 5, min_relevance_score: 60, use_ai: true, ai_fallback: true },
+    { source_page_id: '3f2c8a4e-1b6d-4c1e-9a53-0d7f6b2e8c11', use_ai: false, dry_run: true },
+  ],
+};
+
+export const GENERATION_MODES = ['ai', 'deterministic', 'deterministic_fallback'];
+
+export const ScoreSignals = {
+  $id: 'ScoreSignals',
+  type: 'object',
+  description:
+    'Deterministic relevance signals, each 0-1. Terms are weighted by site-level IDF and generic business ' +
+    'words (software, development, company, service, ...) are damped, so shared boilerplate scores ~0.',
+  properties: {
+    title_overlap: { type: 'number', description: 'Source title vs target title (weighted Jaccard)' },
+    h1_overlap: { type: 'number', description: 'Source H1 vs target H1 (weighted Jaccard)' },
+    content_title: { type: 'number', description: 'Share of the target title found in the source text' },
+    content_h1: { type: 'number', description: 'Share of the target H1 found in the source text' },
+    keyword_overlap: { type: 'number', description: 'Share of the target keywords found in the source text' },
+    phrase_overlap: { type: 'number', description: 'Share of target 2-3 word phrases found in the source body copy' },
+    slug_similarity: { type: 'number', description: 'Share of target URL slug words found in the source text' },
+    region_language: { type: 'number', description: '1 = same language/region, lower when unknown or different' },
+    quality: { type: 'number', description: 'Target has title, H1, meta description, keywords' },
+  },
+  required: [
+    'title_overlap', 'h1_overlap', 'content_title', 'content_h1', 'keyword_overlap', 'phrase_overlap', 'slug_similarity',
+    'region_language', 'quality',
+  ],
+};
+
+export const CandidateScore = {
+  $id: 'CandidateScore',
+  type: 'object',
+  properties: {
+    target_page_id: uuidOut,
+    target_url: { type: 'string' },
+    retrieval_score: { type: ['number', 'null'], description: 'TF-IDF retrieval score (AI mode); null in deterministic modes' },
+    score: { type: 'number', minimum: 0, maximum: 1, description: 'Deterministic relevance score 0-1' },
+    signals: { $ref: 'ScoreSignals#' },
+  },
+  required: ['target_page_id', 'target_url', 'retrieval_score', 'score', 'signals'],
+  examples: [
+    {
+      target_page_id: '9b1d2c3e-4f5a-4b6c-8d7e-0f1a2b3c4d5e',
+      target_url: 'https://rytsensetech.com/ai-voice-agent/',
+      retrieval_score: null,
+      score: 0.71,
+      signals: {
+        title_overlap: 0.12, h1_overlap: 0.1, content_title: 0.92, content_h1: 0.81, keyword_overlap: 0.64,
+        phrase_overlap: 0.5, slug_similarity: 0.88, region_language: 1, quality: 1,
+      },
+    },
+  ],
 };
 
 const suggestionReadProperties = {
@@ -101,12 +170,27 @@ export const AnalyzeResponse = {
       description: 'Pages removed before AI scoring, by reason (e.g. NOINDEX, REDIRECTED)',
     },
     dry_run: { type: 'boolean' },
+    generation_mode: {
+      type: 'string',
+      enum: GENERATION_MODES,
+      description: 'ai | deterministic (use_ai=false) | deterministic_fallback (ai_fallback=true and the AI failed)',
+    },
+    ai_error: {
+      type: ['string', 'null'],
+      description: 'Why the AI was not used in deterministic_fallback mode, else null',
+      examples: ['AI_PROVIDER_NOT_CONFIGURED', 'AI_PROVIDER_ERROR', 'AI_INVALID_RESPONSE'],
+    },
+    candidates: {
+      type: 'array',
+      items: { $ref: 'CandidateScore#' },
+      description: 'Candidate pool with explainable deterministic scores (why each target ranked where it did)',
+    },
     suggestions: { type: 'array', items: { $ref: 'SuggestionRead#' } },
     skipped: { type: 'array', items: { $ref: 'SkippedCandidate#' } },
   },
   required: [
     'source_page_id', 'min_relevance_score', 'candidates_retrieved', 'candidates_after_filtering', 'excluded_counts',
-    'dry_run', 'suggestions', 'skipped',
+    'dry_run', 'generation_mode', 'ai_error', 'candidates', 'suggestions', 'skipped',
   ],
 };
 
@@ -129,6 +213,6 @@ export const RejectRequest = {
 };
 
 export const interlinkSchemas = [
-  SuggestionStatus, AnalyzeRequest, SuggestionRead, SuggestionDetail, SkippedCandidate, AnalyzeResponse, SuggestionList,
-  RejectRequest,
+  SuggestionStatus, AnalyzeRequest, SuggestionRead, SuggestionDetail, SkippedCandidate, ScoreSignals, CandidateScore,
+  AnalyzeResponse, SuggestionList, RejectRequest,
 ];

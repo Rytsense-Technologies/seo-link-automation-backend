@@ -4,7 +4,9 @@
  */
 
 import { extractText } from '../content/html.js';
+import { isAsset, normalizeCrawlUrl } from '../crawler/urls.js';
 import { normalizeUrl, sameHost, urlKey, urlPath } from '../utils/urls.js';
+import { parseQsl, urlsplit } from '../utils/pyurl.js';
 import { pyLower, pyStrip } from '../utils/pytext.js';
 
 export const ExclusionReason = Object.freeze({
@@ -23,6 +25,9 @@ export const ExclusionReason = Object.freeze({
   UTILITY_PAGE: 'UTILITY_PAGE',
   ALREADY_LINKED: 'ALREADY_LINKED',
   UNLINKABLE_URL: 'UNLINKABLE_URL',
+  ASSET_URL: 'ASSET_URL',
+  TRACKING_URL: 'TRACKING_URL',
+  ALTERNATE_VERSION: 'ALTERNATE_VERSION',
   EMPTY_CONTENT: 'EMPTY_CONTENT',
 });
 
@@ -40,8 +45,73 @@ export function filterConfig({ utilityPageTypes = [], utilityPathPatterns = [], 
 const normLang = (value) => (value ? pyLower(value.split('-')[0].split('_')[0]) : null);
 const normRegion = (value) => (value ? pyLower(value) : null);
 
+/**
+ * Comparison key for "is this the same page?": the crawler's normalisation (no fragment, no
+ * tracking parameters, sorted query) followed by `urlKey` (trailing slash, www., http/https).
+ */
+export function linkKey(url) {
+  try {
+    return urlKey(normalizeCrawlUrl(url) ?? url);
+  } catch {
+    return url; // malformed URL (e.g. bad IPv6 netloc): it can only equal itself
+  }
+}
+
 export function linkedUrlKeys(urls) {
-  return new Set([...urls].map((u) => urlKey(u)));
+  return new Set([...urls].map((u) => linkKey(u)));
+}
+
+/**
+ * Leading locale/region path segments such as /us/, /uk/, /ae/, /de/ or /en-gb/. Deliberately a
+ * curated list, not "any two letters": segments like /ai/, /it/, /hr/, /qa/, /id/ and /no/ are
+ * far more often a topic or department than a locale, and treating those as locale twins would
+ * silently drop valid link targets.
+ */
+export const LOCALE_SEGMENTS = new Set([
+  'us', 'uk', 'gb', 'ca', 'au', 'nz', 'ie', 'in', 'sg', 'hk', 'my', 'ph', 'th', 'vn', 'jp', 'cn', 'kr', 'tw',
+  'ae', 'sa', 'kw', 'bh', 'om', 'il', 'tr', 'za', 'ng', 'ke', 'eg',
+  'de', 'fr', 'es', 'pt', 'nl', 'be', 'ch', 'at', 'se', 'dk', 'fi', 'pl', 'cz', 'ro', 'gr', 'ru', 'ua',
+  'br', 'mx', 'ar', 'cl', 'co', 'eu',
+]);
+const LOCALE_LANGUAGES = new Set(['en', 'de', 'fr', 'es', 'pt', 'nl', 'it', 'sv', 'da', 'fi', 'pl', 'ru', 'ja', 'zh', 'ko', 'ar', 'tr', 'hi']);
+
+/** The leading locale segment of a path, or null. */
+export function localeSegment(path) {
+  const segment = path.split('/')[1]?.toLowerCase() ?? '';
+  if (LOCALE_SEGMENTS.has(segment)) return segment;
+  const parts = /^([a-z]{2})[-_]([a-z]{2})$/.exec(segment);
+  return parts && LOCALE_LANGUAGES.has(parts[1]) ? segment : null;
+}
+
+/**
+ * True when `target` is the same page as `source` for another locale (`/us/x/` vs `/x/`, or
+ * `/uk/x/` vs `/us/x/`) and the stored region metadata cannot tell them apart (same or missing
+ * region, e.g. a crawl that stores every page as "global"). Linking a page to its own localised
+ * twin is not a useful internal link. When regions differ, the region rules above decide.
+ */
+export function isAlternateVersion(source, target) {
+  if (normRegion(source.region) !== normRegion(target.region)) return false;
+  const strip = (path, locale) => (locale ? path.slice(locale.length + 1) : path).replace(/\/+$/, '').toLowerCase() || '/';
+  const sourcePath = urlPath(source.url);
+  const targetPath = urlPath(target.url);
+  const sourceLocale = localeSegment(sourcePath);
+  const targetLocale = localeSegment(targetPath);
+  // One of them must be locale-prefixed, and they must not be the same locale.
+  if (sourceLocale === targetLocale) return false;
+  const rest = strip(sourcePath, sourceLocale);
+  return rest === strip(targetPath, targetLocale) && rest !== '/';
+}
+
+/** True when the URL carries tracking parameters (utm_*, gclid, ...) that normalisation strips. */
+export function hasTrackingParams(url) {
+  let clean;
+  try {
+    clean = normalizeCrawlUrl(url);
+  } catch {
+    return false;
+  }
+  if (clean === null) return false;
+  return parseQsl(urlsplit(clean).query, true).length < parseQsl(urlsplit(url).query, true).length;
 }
 
 /**
@@ -75,10 +145,14 @@ export function targetExclusionReason(source, target, config, linkedKeys = null)
     // A target without a region is treated as global and may be linked from any region.
     if (srcRegion && tgtRegion && srcRegion !== tgtRegion) return ExclusionReason.REGION_MISMATCH;
   }
+  if (isAlternateVersion(source, target)) return ExclusionReason.ALTERNATE_VERSION;
   if (isUtilityPage(target, config)) return ExclusionReason.UTILITY_PAGE;
+  // Assets not already caught by the utility path patterns, and tracking-parameter URL variants.
+  if (isAsset(target.url)) return ExclusionReason.ASSET_URL;
+  if (hasTrackingParams(target.url)) return ExclusionReason.TRACKING_URL;
   if (!hasUsableContent(target)) return ExclusionReason.EMPTY_CONTENT;
   const keys = linkedKeys ?? linkedUrlKeys(source.outgoing_links ?? []);
-  if (keys.has(urlKey(target.url))) return ExclusionReason.ALREADY_LINKED;
+  if (keys.has(linkKey(target.url))) return ExclusionReason.ALREADY_LINKED;
   return null;
 }
 

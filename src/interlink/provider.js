@@ -46,6 +46,21 @@ export function parseJsonObject(text) {
   return value;
 }
 
+/**
+ * One-line, log-safe summary of an error response body. Providers occasionally answer with a
+ * body that is not readable text (e.g. a gzip-encoded error page that arrives undecoded), which
+ * would otherwise put raw bytes and control characters into the log. Only used for logging: the
+ * error code, message and HTTP status are unaffected.
+ */
+export function summariseErrorBody(text, limit = 500) {
+  if (!text) return '<empty body>';
+  // U+FFFD appears where bytes were not valid UTF-8; C0 controls never occur in a text body.
+  const unreadable = (text.match(/[\uFFFD\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) ?? []).length;
+  if (unreadable > text.length / 20) return `<non-text body, ${text.length} bytes>`;
+  const cleaned = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned.length > limit ? `${cleaned.slice(0, limit)}…` : cleaned;
+}
+
 /** Shared HTTP plumbing (never logs the request: it carries credentials). */
 export class HTTPProvider extends AIProvider {
   constructor({ apiKey, model, baseUrl, timeout, temperature, fetchImpl = globalThis.fetch }) {
@@ -73,7 +88,7 @@ export class HTTPProvider extends AIProvider {
       throw new AIProviderError(`${this.name} request failed`);
     }
     if (response.status >= 400) {
-      logger.warn(`${this.name} returned HTTP ${response.status}: ${text.slice(0, 500)}`);
+      logger.warn(`${this.name} returned HTTP ${response.status}: ${summariseErrorBody(text)}`);
       throw new AIProviderError(`${this.name} returned HTTP ${response.status}`, {
         details: { provider_status: response.status },
       });

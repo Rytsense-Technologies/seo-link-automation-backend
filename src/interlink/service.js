@@ -6,9 +6,9 @@
 import { randomUUID } from 'node:crypto';
 import { extractBlocks, extractText } from '../content/html.js';
 import { internalLinksFor } from '../content/store.js';
-import { ConflictError, NotFoundError, UnprocessableError } from '../utils/errors.js';
+import { ConflictError, NotFoundError, ServiceUnavailableError, UnprocessableError } from '../utils/errors.js';
 import { siteRelative } from '../utils/urls.js';
-import { pySliceHead } from '../utils/pytext.js';
+import { pyCompare, pySliceHead } from '../utils/pytext.js';
 import { anchorProblem, containsPhrase, normalizeForMatch } from './anchor-rules.js';
 import {
   ExclusionReason,
@@ -19,7 +19,27 @@ import {
 } from './candidate-filter.js';
 import { LinkApplicationError, applyLink } from './apply.js';
 import { SuggestionStatus } from './repository.js';
+import { AIProviderError } from './provider.js';
+import { buildTermWeights, scoreTarget, sourceProfile } from './relevance-scorer.js';
+import {
+  DETERMINISTIC_PROVIDER,
+  NO_ANCHOR_IN_SOURCE,
+  deterministicItem,
+  findPlacements,
+  splitSentences,
+} from './deterministic-suggester.js';
 import { logger } from '../utils/logger.js';
+
+export const GenerationMode = Object.freeze({
+  AI: 'ai',
+  DETERMINISTIC: 'deterministic',
+  DETERMINISTIC_FALLBACK: 'deterministic_fallback',
+});
+
+/** Errors that `ai_fallback: true` may turn into deterministic suggestions (never DB/validation errors). */
+export function isAiFailure(err) {
+  return err instanceof AIProviderError || (err instanceof ServiceUnavailableError && err.code === 'AI_PROVIDER_NOT_CONFIGURED');
+}
 
 export const SkipReason = Object.freeze({
   ACTIVE_SUGGESTION_EXISTS: 'ACTIVE_SUGGESTION_EXISTS',
@@ -30,6 +50,7 @@ export const SkipReason = Object.freeze({
   DUPLICATE_ANCHOR: 'DUPLICATE_ANCHOR',
   ANCHOR_OVERUSED: 'ANCHOR_OVERUSED',
   MAX_SUGGESTIONS_REACHED: 'MAX_SUGGESTIONS_REACHED',
+  NO_ANCHOR_IN_SOURCE,
 });
 
 export function interlinkConfig(overrides = {}) {
@@ -40,6 +61,7 @@ export function interlinkConfig(overrides = {}) {
     rejectionCooldownDays: 30,
     maxAnchorReuse: 3,
     targetExcerptChars: 300,
+    deterministicMinScore: 0.35,
     filters: filterConfig(),
     ...overrides,
   };
@@ -53,6 +75,7 @@ export function interlinkConfigFromSettings(s) {
     rejectionCooldownDays: s.interlink_rejection_cooldown_days,
     maxAnchorReuse: s.interlink_max_anchor_reuse,
     targetExcerptChars: s.interlink_target_excerpt_chars,
+    deterministicMinScore: s.interlink_deterministic_min_score,
     filters: filterConfig({
       utilityPageTypes: s.interlink_utility_page_types,
       utilityPathPatterns: s.interlink_utility_path_patterns,
@@ -74,6 +97,38 @@ const skipped = (candidate, reason) => ({
   target_url: candidate.page.url,
   reason,
 });
+
+function newOutcome(run, { minScore, retrieved, mode, aiError = null }) {
+  return {
+    source_page_id: run.source.id,
+    min_relevance_score: minScore,
+    candidates_retrieved: retrieved,
+    candidates_after_filtering: run.eligible.length,
+    excluded_counts: run.excludedCounts,
+    dry_run: run.request.dry_run,
+    generation_mode: mode,
+    ai_error: aiError,
+    candidates: [],
+    suggestions: [],
+    skipped: [],
+  };
+}
+
+const diagnostic = (scored, retrievalScore) => ({
+  target_page_id: scored.page.id,
+  target_url: scored.page.url,
+  retrieval_score: retrievalScore,
+  score: scored.score,
+  signals: scored.signals,
+});
+
+/** Explainable deterministic signals for the retrieved AI candidate pool (diagnostics only). */
+function candidateDiagnostics(source, sourceText, eligible, candidates) {
+  if (!candidates.length) return [];
+  const profile = sourceProfile(source, sourceText);
+  const weight = buildTermWeights(source, eligible);
+  return candidates.map((c) => diagnostic({ page: c.page, ...scoreTarget(profile, c.page, weight) }, c.score));
+}
 
 export class InterlinkService {
   /**
@@ -106,7 +161,6 @@ export class InterlinkService {
       throw new UnprocessableError('Source page has no body copy that can host links', { code: 'NO_LINKABLE_CONTENT' });
     }
 
-    const minScore = Math.max(cfg.minRelevanceScore, request.min_relevance_score || 0);
     const maxSuggestions = request.max_suggestions || cfg.maxSuggestionsPerPage;
     const linkedKeys = linkedUrlKeys([...(source.outgoing_links ?? []), ...internalLinksFor(source.url, content)]);
 
@@ -130,41 +184,48 @@ export class InterlinkService {
       }
     }
 
-    // 3. Candidate retrieval.
     const sourceText = linkContexts.join('\n');
+    const run = { request, source, content, linkContexts, sourceText, eligible, excludedCounts, maxSuggestions };
+    // use_ai=false: deterministic only; the AI provider is never resolved or called.
+    if (request.use_ai === false) return this.analyzeDeterministic(run, GenerationMode.DETERMINISTIC, null);
+
+    // 3. Candidate retrieval.
+    const minScore = Math.max(cfg.minRelevanceScore, request.min_relevance_score || 0);
     const candidates = this.retriever.retrieve(source, sourceText, eligible, cfg.candidatePoolSize);
-    const outcome = {
-      source_page_id: source.id,
-      min_relevance_score: minScore,
-      candidates_retrieved: candidates.length,
-      candidates_after_filtering: eligible.length,
-      excluded_counts: excludedCounts,
-      dry_run: request.dry_run,
-      suggestions: [],
-      skipped: [],
-    };
+    const outcome = newOutcome(run, { minScore, retrieved: candidates.length, mode: GenerationMode.AI });
+    outcome.candidates = candidateDiagnostics(source, sourceText, eligible, candidates);
     if (!candidates.length) {
       logger.info(`Interlink analysis for ${source.url}: no candidates`);
       return outcome;
     }
 
     // 4. AI relevance analysis over the compact candidate pool only.
-    const analyzer = await this.analyzerFactory();
-    const targetIds = candidates.map((c) => c.page.id);
-    const contents = await this.repo.loadContents(targetIds);
-    const excerpts = new Map([...contents].map(([pid, html]) => [String(pid), pySliceHead(extractText(html), cfg.targetExcerptChars)]));
-    const existingAnchors = await this.repo.anchorsByTarget(targetIds);
-    const prompt = analyzer.buildPrompt({
-      sourceUrl: source.url,
-      sourceTitle: source.title,
-      sourceH1: source.h1,
-      sourceKeywords: source.keywords ?? [],
-      sourceContent: sourceText,
-      candidates,
-      candidateExcerpts: excerpts,
-      avoidAnchors: new Map([...existingAnchors].map(([k, v]) => [String(k), v])),
-    });
-    const analysis = await analyzer.analyze(prompt, candidates);
+    let analyzer;
+    let analysis;
+    let existingAnchors;
+    try {
+      analyzer = await this.analyzerFactory();
+      const targetIds = candidates.map((c) => c.page.id);
+      const contents = await this.repo.loadContents(targetIds);
+      const excerpts = new Map([...contents].map(([pid, html]) => [String(pid), pySliceHead(extractText(html), cfg.targetExcerptChars)]));
+      existingAnchors = await this.repo.anchorsByTarget(targetIds);
+      const prompt = analyzer.buildPrompt({
+        sourceUrl: source.url,
+        sourceTitle: source.title,
+        sourceH1: source.h1,
+        sourceKeywords: source.keywords ?? [],
+        sourceContent: sourceText,
+        candidates,
+        candidateExcerpts: excerpts,
+        avoidAnchors: new Map([...existingAnchors].map(([k, v]) => [String(k), v])),
+      });
+      analysis = await analyzer.analyze(prompt, candidates);
+    } catch (err) {
+      // Without an explicit ai_fallback the existing 502/503 behaviour is preserved.
+      if (!request.ai_fallback || !isAiFailure(err)) throw err;
+      logger.warn(`AI suggestions unavailable for ${source.url} (${err.code}); using deterministic fallback`);
+      return this.analyzeDeterministic(run, GenerationMode.DETERMINISTIC_FALLBACK, err.code);
+    }
     const byId = new Map(candidates.map((c) => [String(c.page.id), c]));
     for (const [targetId, reason] of analysis.discarded) {
       const cand = byId.get(targetId);
@@ -172,51 +233,21 @@ export class InterlinkService {
     }
 
     // 5. Validate, threshold, and store.
-    const usedContexts = new Set();
-    const usedAnchors = new Set();
+    const state = this.storeState(run, minScore, existingAnchors);
     const ordered = [...analysis.items].sort((a, b) => b.relevance_score - a.relevance_score);
     for (const item of ordered) {
       const cand = byId.get(item.target_page_id);
-      let problem = this.validateItem(item, cand, {
-        content,
-        sourceUrl: source.url,
-        linkContexts,
-        minScore,
-        usedContexts,
-        usedAnchors,
-        existingAnchors: existingAnchors.get(cand.page.id) ?? [],
-      });
+      let problem = this.validateItem(item, cand, state.validation(cand));
       if (problem === null && outcome.suggestions.length >= maxSuggestions) problem = SkipReason.MAX_SUGGESTIONS_REACHED;
       if (problem !== null) {
         outcome.skipped.push(skipped(cand, problem));
         continue;
       }
-      const suggestion = {
-        id: randomUUID(),
-        site_id: source.site_id,
-        source_page_id: source.id,
-        target_page_id: cand.page.id,
-        anchor_text: item.anchor_text,
-        context: item.suggested_context,
-        relevance_score: item.relevance_score,
-        reason: item.reason,
-        status: SuggestionStatus.PENDING,
-        retrieval_score: cand.score,
-        ai_provider: analyzer.providerName,
-        ai_model: analyzer.modelName,
-        rejection_reason: null,
-        reviewed_at: null,
-        applied_at: null,
-        created_at: null,
-        updated_at: null,
-      };
-      if (!request.dry_run && !(await this.repo.addSuggestion(suggestion))) {
-        outcome.skipped.push(skipped(cand, SkipReason.ACTIVE_SUGGESTION_EXISTS));
-        continue;
-      }
-      usedContexts.add(normalizeForMatch(item.suggested_context));
-      usedAnchors.add(normalizeForMatch(item.anchor_text));
-      outcome.suggestions.push(suggestion);
+      await this.storeSuggestion(outcome, state, item, cand, {
+        provider: analyzer.providerName,
+        model: analyzer.modelName,
+        retrievalScore: cand.score,
+      });
     }
 
     if (!request.dry_run) await this.repo.commit();
@@ -225,6 +256,121 @@ export class InterlinkService {
         `suggestions, ${outcome.skipped.length} skipped (dry_run=${request.dry_run})`,
     );
     return outcome;
+  }
+
+  /**
+   * Deterministic suggestions: rank every eligible target with the explainable scorer, keep the
+   * strongest `candidatePoolSize`, and propose a link only where a phrase naming the target
+   * already appears in a source sentence. Same validation, thresholds and storage as the AI path.
+   */
+  async analyzeDeterministic(run, mode, aiError) {
+    const cfg = this.config;
+    const { request, source, sourceText, eligible } = run;
+    const minScore = Math.max(Math.round(cfg.deterministicMinScore * 100), request.min_relevance_score || 0);
+    const profile = sourceProfile(source, sourceText);
+    const weight = buildTermWeights(source, eligible);
+    const ranked = eligible
+      .map((page) => ({ page, ...scoreTarget(profile, page, weight) }))
+      .sort((a, b) => b.score - a.score || pyCompare(a.page.url, b.page.url))
+      .slice(0, cfg.candidatePoolSize);
+    const outcome = newOutcome(run, { minScore, retrieved: ranked.length, mode, aiError });
+    outcome.candidates = ranked.map((r) => diagnostic(r, null));
+
+    const sentences = run.linkContexts.flatMap((block) => splitSentences(block));
+    const existingAnchors = ranked.length ? await this.repo.anchorsByTarget(ranked.map((r) => r.page.id)) : new Map();
+    const state = this.storeState(run, minScore, existingAnchors);
+    for (const scored of ranked) {
+      const cand = { page: scored.page, score: scored.score };
+      if (Math.round(scored.score * 100) < minScore) {
+        outcome.skipped.push(skipped(cand, SkipReason.BELOW_THRESHOLD));
+        continue;
+      }
+      if (outcome.suggestions.length >= run.maxSuggestions) {
+        outcome.skipped.push(skipped(cand, SkipReason.MAX_SUGGESTIONS_REACHED));
+        continue;
+      }
+      const placements = findPlacements(scored.page, sentences, weight, {
+        usedContexts: state.usedContexts,
+        usedAnchors: state.usedAnchors,
+      });
+      let problem = NO_ANCHOR_IN_SOURCE;
+      let item = null;
+      for (const placement of placements) {
+        const candidateItem = deterministicItem(scored.page, placement, scored);
+        problem = this.validateItem(candidateItem, cand, state.validation(cand));
+        if (problem === null) {
+          item = candidateItem;
+          break;
+        }
+      }
+      if (item === null) {
+        outcome.skipped.push(skipped(cand, problem));
+        continue;
+      }
+      await this.storeSuggestion(outcome, state, item, cand, {
+        provider: DETERMINISTIC_PROVIDER,
+        model: null,
+        retrievalScore: scored.score,
+      });
+    }
+
+    if (!request.dry_run) await this.repo.commit();
+    logger.info(
+      `Interlink ${mode} analysis for ${source.url}: ${ranked.length} candidates, ${outcome.suggestions.length} ` +
+        `suggestions, ${outcome.skipped.length} skipped (dry_run=${request.dry_run})`,
+    );
+    return outcome;
+  }
+
+  /** Per-run bookkeeping shared by the AI and deterministic paths (one anchor/sentence per link). */
+  storeState(run, minScore, existingAnchors) {
+    const usedContexts = new Set();
+    const usedAnchors = new Set();
+    return {
+      run,
+      usedContexts,
+      usedAnchors,
+      validation: (cand) => ({
+        content: run.content,
+        sourceUrl: run.source.url,
+        linkContexts: run.linkContexts,
+        minScore,
+        usedContexts,
+        usedAnchors,
+        existingAnchors: existingAnchors.get(cand.page.id) ?? [],
+      }),
+    };
+  }
+
+  /** Insert one validated item as PENDING (unless dry_run) and record it in the outcome. */
+  async storeSuggestion(outcome, state, item, cand, { provider, model, retrievalScore }) {
+    const { source, request } = state.run;
+    const suggestion = {
+      id: randomUUID(),
+      site_id: source.site_id,
+      source_page_id: source.id,
+      target_page_id: cand.page.id,
+      anchor_text: item.anchor_text,
+      context: item.suggested_context,
+      relevance_score: item.relevance_score,
+      reason: item.reason,
+      status: SuggestionStatus.PENDING,
+      retrieval_score: retrievalScore,
+      ai_provider: provider,
+      ai_model: model,
+      rejection_reason: null,
+      reviewed_at: null,
+      applied_at: null,
+      created_at: null,
+      updated_at: null,
+    };
+    if (!request.dry_run && !(await this.repo.addSuggestion(suggestion))) {
+      outcome.skipped.push(skipped(cand, SkipReason.ACTIVE_SUGGESTION_EXISTS));
+      return;
+    }
+    state.usedContexts.add(normalizeForMatch(item.suggested_context));
+    state.usedAnchors.add(normalizeForMatch(item.anchor_text));
+    outcome.suggestions.push(suggestion);
   }
 
   validateItem(item, cand, { content, sourceUrl, linkContexts, minScore, usedContexts, usedAnchors, existingAnchors }) {
