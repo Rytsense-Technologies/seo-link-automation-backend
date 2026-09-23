@@ -136,6 +136,25 @@ describe('deterministic mode (use_ai=false)', () => {
     expect(out.skipped).toContainEqual({ target_page_id: related.id, target_url: related.url, reason: SkipReason.NO_ANCHOR_IN_SOURCE });
   });
 
+  it('scores the anchor it actually stores, not the best one it could not use', async () => {
+    const site = makeSiteFixture();
+    // Two targets whose best anchor is the same sentence: the second must fall back to another
+    // anchor, and its stored score must reflect that anchor rather than the unavailable one.
+    site.repo.addPage(makePage('/voice-agents-handbook/', { title: 'AI Voice Agents Handbook', h1: 'AI Voice Agents' }));
+    const out = await buildService(site.repo, null, { config: defaultConfig({ deterministicMinScore: 0 }) }).analyze(
+      request(site, { use_ai: false, dry_run: true }),
+    );
+    for (const s of out.suggestions) {
+      const reported = out.candidates.find((c) => c.target_page_id === s.target_page_id);
+      expect(s.relevance_score).toBe(Math.round(reported.score * 100));
+      expect(s.retrieval_score).toBe(reported.score);
+      expect(s.context).toContain(s.anchor_text);
+    }
+    // Strongest first, whichever anchor each target ended up with.
+    const scores = out.suggestions.map((s) => s.relevance_score);
+    expect(scores).toEqual([...scores].sort((a, b) => b - a));
+  });
+
   it('uses each source sentence and anchor at most once', async () => {
     const site = makeSiteFixture();
     // Two targets that can only be anchored in the same sentence.

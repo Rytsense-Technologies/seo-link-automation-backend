@@ -25,17 +25,66 @@ export const GENERIC_WEIGHT = 0.05;
 // whose title is only generic words cannot reach full coverage by matching those words.
 export const MIN_EVIDENCE = 1.0;
 
+/**
+ * Signal weights; they must sum to exactly 1.0 (asserted by the tests).
+ *
+ * The ordering encodes the principle "actual contextual relationship > raw URL similarity":
+ * what the source text really says about the target (content_title, phrase_overlap) and how
+ * useful the anchor would be (anchor_quality) outweigh slug similarity, which is easy to match
+ * by accident — a target whose slug echoes the source topic must not rank highly without a
+ * meaningful phrase to link from. `quality` and `region_language` are context-free and gated
+ * (see scoreTarget), so they cannot lift an unrelated page on their own.
+ */
 export const SIGNAL_WEIGHTS = Object.freeze({
-  content_title: 0.22,
-  phrase_overlap: 0.18,
-  content_h1: 0.14,
-  keyword_overlap: 0.12,
-  slug_similarity: 0.1,
-  title_overlap: 0.08,
-  h1_overlap: 0.06,
+  content_title: 0.18,
+  phrase_overlap: 0.16,
+  anchor_quality: 0.16,
+  content_h1: 0.12,
+  keyword_overlap: 0.1,
+  title_overlap: 0.07,
+  slug_similarity: 0.06,
   quality: 0.06,
+  h1_overlap: 0.05,
   region_language: 0.04,
 });
+
+/** Signals that say nothing about the source/target relationship, so they are gated. */
+const CONTEXT_FREE_SIGNALS = ['quality', 'region_language'];
+
+/**
+ * anchor_quality sub-weights (sum 1.0): how much of the target's identity the phrase conveys,
+ * how specific it is, and how established it is in the source copy. Identity leads, because
+ * naming the target is what separates a useful anchor from a merely rare word: "assistants" is
+ * an unusual word but only a fragment of "Smart Digital Assistants", while "chatbot development"
+ * names its page outright.
+ */
+export const ANCHOR_IDENTITY_WEIGHT = 0.5;
+export const ANCHOR_SPECIFICITY_WEIGHT = 0.3;
+export const ANCHOR_SUPPORT_WEIGHT = 0.2;
+// Term weight an anchor needs before it counts as fully specific (~one distinctive word plus a
+// modifier). Generic words contribute GENERIC_WEIGHT each, so a generic phrase cannot reach it.
+export const ANCHOR_EVIDENCE = 1.2;
+/**
+ * Mentions beyond this add nothing to `support`. A shorter phrase always occurs at least as often
+ * as the longer one containing it ("AI chatbot" vs "AI chatbot development"), so an uncapped
+ * mention count would quietly favour vaguer anchors; the cap only asks that the phrase is
+ * genuinely established in the copy.
+ */
+export const ANCHOR_SUPPORT_SATURATION = 2;
+/**
+ * Floor applied to non-generic terms when judging an anchor. Ranking targets uses plain IDF, so a
+ * word most pages share carries little weight. Anchor quality asks a different question - does
+ * this phrase name the target and avoid boilerplate? - and there the site's core vocabulary is
+ * exactly what good anchors are made of ("chatbot" on a chatbot site), so it must not be treated
+ * as noise. Generic business words stay damped.
+ */
+export const ANCHOR_TOPICAL_FLOOR = 0.5;
+/**
+ * Applied when the anchor appears in neither the target's title nor its URL slug. A page is known
+ * by those two; matching only a slogan H1 ("Transform Your Business") does not make "transform" a
+ * useful anchor for it.
+ */
+export const ANCHOR_OFF_TITLE_PENALTY = 0.5;
 
 const round4 = (x) => Number(x.toFixed(4));
 
@@ -82,11 +131,12 @@ export function buildTermWeights(source, pages) {
   const docs = [source, ...pages].map((p) => new Map([...tokenSet(pageFields(p).join(' '))].map((t) => [t, 1])));
   const idfValues = idf(docs);
   const maxIdf = idfValues.size ? Math.max(...idfValues.values()) : 1.0;
-  return (term) => {
-    const generic = term.split(' ').every((t) => GENERIC_TERMS.has(t));
-    const idfNorm = (idfValues.get(term) ?? maxIdf) / maxIdf;
-    return generic ? GENERIC_WEIGHT * idfNorm : idfNorm;
-  };
+  const isGeneric = (term) => term.split(' ').every((t) => GENERIC_TERMS.has(t));
+  const idfNorm = (term) => (idfValues.get(term) ?? maxIdf) / maxIdf;
+  const weight = (term) => (isGeneric(term) ? GENERIC_WEIGHT * idfNorm(term) : idfNorm(term));
+  // Companion weighting for anchor quality (see ANCHOR_TOPICAL_FLOOR).
+  weight.anchor = (term) => (isGeneric(term) ? GENERIC_WEIGHT : Math.max(idfNorm(term), ANCHOR_TOPICAL_FLOOR));
+  return weight;
 }
 
 const flatWeight = (term) => (term.split(' ').every((t) => GENERIC_TERMS.has(t)) ? GENERIC_WEIGHT : 1.0);
@@ -170,11 +220,57 @@ export function sourceProfile(source, sourceText) {
   };
 }
 
+/** How often the anchor phrase itself occurs in the source body copy. */
+export function sourceMentions(profile, anchor) {
+  const tokens = tokenize(anchor);
+  if (!tokens.length) return 0;
+  if (tokens.length === 1) return profile.contentTokens.get(tokens[0]) ?? 0;
+  if (tokens.length <= 3) return profile.contentPhrases.get(tokens.join(' ')) ?? 0;
+  // Longer anchors: they occur at most as often as their rarest 3-word window.
+  let fewest = Infinity;
+  for (let i = 0; i + 3 <= tokens.length; i += 1) {
+    fewest = Math.min(fewest, profile.contentPhrases.get(tokens.slice(i, i + 3).join(' ')) ?? 0);
+  }
+  return fewest === Infinity ? 0 : fewest;
+}
+
 /**
- * Score one target. `weight` comes from buildTermWeights (defaults to the generic-damped flat weight).
+ * How useful an anchor is for an internal link, 0-1. Deliberately not a word count: a single
+ * word can be strong when it is specific and names the target ("chatbots"), while a phrase full
+ * of generic business words stays weak ("software development services"). Three parts:
+ *
+ * - specificity: the anchor's own term weight (IDF-based, generic vocabulary damped to ~5%), so
+ *   "booking" or "software" alone scores low while "AI appointment booking" reaches full credit.
+ * - identity:    how much of the target's title/H1/keywords the anchor actually conveys, which is
+ *   what separates "assistants" from "smart digital assistants" for the same page.
+ * - support:     how established the phrase already is in the source copy (a single passing
+ *   mention is weaker evidence than a recurring one).
+ */
+export function anchorQualitySignal(anchor, target, profile, weight = flatWeight) {
+  const anchorTokens = tokenSet(anchor);
+  if (!anchorTokens.size) return 0;
+  const w = weight.anchor ?? weight;
+  const specificity = Math.min(1, weightSum(anchorTokens, w) / ANCHOR_EVIDENCE);
+  // How much of the target's identity the anchor carries, judged against its best-matching field:
+  // naming the H1 in full ("chatbot development") is as good as naming the title in full, and
+  // better than covering a fragment of a long title ("assistants").
+  const fields = [tokenSet(target.title), tokenSet(target.h1), ...(target.keywords ?? []).map((k) => tokenSet(k))].filter((f) => f.size);
+  let identityCoverage = fields.length ? Math.max(...fields.map((field) => coverage(field, anchorTokens, w))) : specificity;
+  const named = new Set([...tokenSet(target.title), ...tokenSet(slugText(target))]);
+  if (named.size && ![...anchorTokens].some((t) => named.has(t))) identityCoverage *= ANCHOR_OFF_TITLE_PENALTY;
+  const support = mentionCredit(Math.min(sourceMentions(profile, anchor), ANCHOR_SUPPORT_SATURATION));
+  return round4(
+    ANCHOR_SPECIFICITY_WEIGHT * specificity + ANCHOR_IDENTITY_WEIGHT * identityCoverage + ANCHOR_SUPPORT_WEIGHT * support,
+  );
+}
+
+/**
+ * Score one target. `weight` comes from buildTermWeights (defaults to the generic-damped flat
+ * weight). `anchorQuality` is 0 while no anchor has been chosen yet (the shortlist pass, and AI
+ * mode when the source has no usable phrase for the target).
  * @returns {{ score: number, signals: Record<string, number> }}
  */
-export function scoreTarget(profile, target, weight = flatWeight) {
+export function scoreTarget(profile, target, weight = flatWeight, { anchorQuality = 0 } = {}) {
   const titleTokens = tokenSet(target.title);
   const h1Tokens = tokenSet(target.h1);
   const keywordTokens = tokenSet((target.keywords ?? []).join(' ; '));
@@ -185,6 +281,7 @@ export function scoreTarget(profile, target, weight = flatWeight) {
     ...(target.keywords ?? []).flatMap((k) => [...phraseSet(k)]),
   ]);
   const signals = {
+    anchor_quality: anchorQuality,
     title_overlap: overlap(profile.titleTokens, titleTokens, weight),
     h1_overlap: overlap(profile.h1Tokens, h1Tokens, weight),
     content_title: coverage(titleTokens, profile.contentTokens, weight),
@@ -198,11 +295,12 @@ export function scoreTarget(profile, target, weight = flatWeight) {
   // Context-free signals (quality, region/language) only count once the target shares real
   // vocabulary with the source; otherwise every well-described page would get a free floor.
   const topical = Object.entries(SIGNAL_WEIGHTS)
-    .filter(([name]) => name !== 'quality' && name !== 'region_language')
+    .filter(([name]) => !CONTEXT_FREE_SIGNALS.includes(name))
     .reduce((sum, [name, w]) => sum + w * signals[name], 0);
-  const topicalMax = 1 - SIGNAL_WEIGHTS.quality - SIGNAL_WEIGHTS.region_language;
+  const topicalMax = 1 - CONTEXT_FREE_SIGNALS.reduce((sum, name) => sum + SIGNAL_WEIGHTS[name], 0);
   const gate = Math.min(1, topical / (0.25 * topicalMax));
-  const score = topical + gate * (SIGNAL_WEIGHTS.quality * signals.quality + SIGNAL_WEIGHTS.region_language * signals.region_language);
+  const contextFree = CONTEXT_FREE_SIGNALS.reduce((sum, name) => sum + SIGNAL_WEIGHTS[name] * signals[name], 0);
+  const score = topical + gate * contextFree;
   for (const k of Object.keys(signals)) signals[k] = round4(signals[k]);
   return { score: round4(Math.min(1, score)), signals };
 }
@@ -219,7 +317,7 @@ export function rankTargets(source, sourceText, targets) {
 /** The strongest signals, for human-readable reasons. */
 export function topSignals(signals, n = 3) {
   return Object.entries(signals)
-    .filter(([name, v]) => v > 0 && name !== 'quality' && name !== 'region_language')
+    .filter(([name, v]) => v > 0 && !CONTEXT_FREE_SIGNALS.includes(name))
     .sort((a, b) => b[1] - a[1] || pyCompare(a[0], b[0]))
     .slice(0, n);
 }

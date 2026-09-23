@@ -63,6 +63,13 @@ export const ScoreSignals = {
     'Deterministic relevance signals, each 0-1. Terms are weighted by site-level IDF and generic business ' +
     'words (software, development, company, service, ...) are damped, so shared boilerplate scores ~0.',
   properties: {
+    anchor_quality: {
+      type: 'number',
+      description:
+        'How useful the selected anchor is (0 when the source offers no usable phrase): phrase specificity, ' +
+        'how much of the target title/H1/keywords it conveys, and how established it is in the source copy. ' +
+        'Not a word count - a specific single word can beat a generic multi-word phrase.',
+    },
     title_overlap: { type: 'number', description: 'Source title vs target title (weighted Jaccard)' },
     h1_overlap: { type: 'number', description: 'Source H1 vs target H1 (weighted Jaccard)' },
     content_title: { type: 'number', description: 'Share of the target title found in the source text' },
@@ -74,8 +81,8 @@ export const ScoreSignals = {
     quality: { type: 'number', description: 'Target has title, H1, meta description, keywords' },
   },
   required: [
-    'title_overlap', 'h1_overlap', 'content_title', 'content_h1', 'keyword_overlap', 'phrase_overlap', 'slug_similarity',
-    'region_language', 'quality',
+    'anchor_quality', 'title_overlap', 'h1_overlap', 'content_title', 'content_h1', 'keyword_overlap', 'phrase_overlap',
+    'slug_similarity', 'region_language', 'quality',
   ],
 };
 
@@ -97,6 +104,7 @@ export const CandidateScore = {
       retrieval_score: null,
       score: 0.71,
       signals: {
+        anchor_quality: 0.86,
         title_overlap: 0.12, h1_overlap: 0.1, content_title: 0.92, content_h1: 0.81, keyword_overlap: 0.64,
         phrase_overlap: 0.5, slug_similarity: 0.88, region_language: 1, quality: 1,
       },

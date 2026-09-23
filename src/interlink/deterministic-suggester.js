@@ -11,7 +11,7 @@
 import { PY_WORD_CHARS, pyCompare } from '../utils/pytext.js';
 import { escapeRegExp, normalizeForMatch } from './anchor-rules.js';
 import { tokenize } from './text-features.js';
-import { GENERIC_TERMS, topSignals } from './relevance-scorer.js';
+import { GENERIC_TERMS, anchorQualitySignal, topSignals } from './relevance-scorer.js';
 
 export const DETERMINISTIC_PROVIDER = 'deterministic';
 export const NO_ANCHOR_IN_SOURCE = 'NO_ANCHOR_IN_SOURCE';
@@ -110,6 +110,17 @@ export function findPlacements(target, sentences, weight, { usedContexts = new S
     if (placements.length >= limit) break;
   }
   return placements;
+}
+
+/**
+ * Placements ordered by how good the anchor is (see anchorQualitySignal), best first. Ties keep
+ * the discovery order, so the choice is deterministic. Each entry carries its `anchor_quality`,
+ * which also feeds the target's relevance score.
+ */
+export function rankPlacements(placements, target, profile, weight) {
+  return placements
+    .map((placement, index) => ({ ...placement, index, anchor_quality: anchorQualitySignal(placement.anchor, target, profile, weight) }))
+    .sort((a, b) => b.anchor_quality - a.anchor_quality || a.index - b.index);
 }
 
 const FIELD_LABEL = { title: 'title', h1: 'H1', keyword: 'keywords' };

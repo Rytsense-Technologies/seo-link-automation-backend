@@ -26,6 +26,7 @@ import {
   NO_ANCHOR_IN_SOURCE,
   deterministicItem,
   findPlacements,
+  rankPlacements,
   splitSentences,
 } from './deterministic-suggester.js';
 import { logger } from '../utils/logger.js';
@@ -122,12 +123,22 @@ const diagnostic = (scored, retrievalScore) => ({
   signals: scored.signals,
 });
 
+/** Best available anchor for a target, with its quality (0 when the source has no usable phrase). */
+function bestAnchor(page, sentences, profile, weight, options = {}) {
+  const placements = rankPlacements(findPlacements(page, sentences, weight, options), page, profile, weight);
+  return { placements, anchorQuality: placements.length ? placements[0].anchor_quality : 0 };
+}
+
 /** Explainable deterministic signals for the retrieved AI candidate pool (diagnostics only). */
-function candidateDiagnostics(source, sourceText, eligible, candidates) {
+function candidateDiagnostics(run, candidates) {
   if (!candidates.length) return [];
-  const profile = sourceProfile(source, sourceText);
-  const weight = buildTermWeights(source, eligible);
-  return candidates.map((c) => diagnostic({ page: c.page, ...scoreTarget(profile, c.page, weight) }, c.score));
+  const profile = sourceProfile(run.source, run.sourceText);
+  const weight = buildTermWeights(run.source, run.eligible);
+  const sentences = run.linkContexts.flatMap((block) => splitSentences(block));
+  return candidates.map((c) => {
+    const { anchorQuality } = bestAnchor(c.page, sentences, profile, weight);
+    return diagnostic({ page: c.page, ...scoreTarget(profile, c.page, weight, { anchorQuality }) }, c.score);
+  });
 }
 
 export class InterlinkService {
@@ -193,7 +204,7 @@ export class InterlinkService {
     const minScore = Math.max(cfg.minRelevanceScore, request.min_relevance_score || 0);
     const candidates = this.retriever.retrieve(source, sourceText, eligible, cfg.candidatePoolSize);
     const outcome = newOutcome(run, { minScore, retrieved: candidates.length, mode: GenerationMode.AI });
-    outcome.candidates = candidateDiagnostics(source, sourceText, eligible, candidates);
+    outcome.candidates = candidateDiagnostics(run, candidates);
     if (!candidates.length) {
       logger.info(`Interlink analysis for ${source.url}: no candidates`);
       return outcome;
@@ -269,14 +280,24 @@ export class InterlinkService {
     const minScore = Math.max(Math.round(cfg.deterministicMinScore * 100), request.min_relevance_score || 0);
     const profile = sourceProfile(source, sourceText);
     const weight = buildTermWeights(source, eligible);
-    const ranked = eligible
+    const sentences = run.linkContexts.flatMap((block) => splitSentences(block));
+    // Two passes: shortlist on topical signals alone (cheap over every eligible page), then
+    // re-score the shortlist with the anchor the source can actually offer, so a target with a
+    // strong contextual phrase outranks one that merely looks similar.
+    const shortlist = eligible
       .map((page) => ({ page, ...scoreTarget(profile, page, weight) }))
       .sort((a, b) => b.score - a.score || pyCompare(a.page.url, b.page.url))
       .slice(0, cfg.candidatePoolSize);
+    const ranked = shortlist
+      .map(({ page }) => {
+        const { placements, anchorQuality } = bestAnchor(page, sentences, profile, weight);
+        return { page, placements, ...scoreTarget(profile, page, weight, { anchorQuality }) };
+      })
+      .sort((a, b) => b.score - a.score || pyCompare(a.page.url, b.page.url));
     const outcome = newOutcome(run, { minScore, retrieved: ranked.length, mode, aiError });
     outcome.candidates = ranked.map((r) => diagnostic(r, null));
+    const diagnostics = new Map(outcome.candidates.map((d) => [d.target_page_id, d]));
 
-    const sentences = run.linkContexts.flatMap((block) => splitSentences(block));
     const existingAnchors = ranked.length ? await this.repo.anchorsByTarget(ranked.map((r) => r.page.id)) : new Map();
     const state = this.storeState(run, minScore, existingAnchors);
     for (const scored of ranked) {
@@ -289,17 +310,22 @@ export class InterlinkService {
         outcome.skipped.push(skipped(cand, SkipReason.MAX_SUGGESTIONS_REACHED));
         continue;
       }
-      const placements = findPlacements(scored.page, sentences, weight, {
-        usedContexts: state.usedContexts,
-        usedAnchors: state.usedAnchors,
-      });
+      // Anchors were ranked in the scoring pass; drop the ones this run has already used.
+      const placements = scored.placements.filter(
+        (p) => !state.usedContexts.has(normalizeForMatch(p.context)) && !state.usedAnchors.has(normalizeForMatch(p.anchor)),
+      );
       let problem = NO_ANCHOR_IN_SOURCE;
       let item = null;
+      let chosen = null;
       for (const placement of placements) {
-        const candidateItem = deterministicItem(scored.page, placement, scored);
+        // Score the anchor that would actually be stored: when the best anchor's sentence is
+        // already taken, the suggestion must carry the weaker anchor's score, not the best one's.
+        const withAnchor = scoreTarget(profile, scored.page, weight, { anchorQuality: placement.anchor_quality });
+        const candidateItem = deterministicItem(scored.page, placement, withAnchor);
         problem = this.validateItem(candidateItem, cand, state.validation(cand));
         if (problem === null) {
           item = candidateItem;
+          chosen = withAnchor;
           break;
         }
       }
@@ -307,12 +333,19 @@ export class InterlinkService {
         outcome.skipped.push(skipped(cand, problem));
         continue;
       }
+      // Report the chosen anchor's score/signals, so diagnostics match the stored suggestion.
+      const reported = diagnostics.get(scored.page.id);
+      if (reported) Object.assign(reported, { score: chosen.score, signals: chosen.signals });
       await this.storeSuggestion(outcome, state, item, cand, {
         provider: DETERMINISTIC_PROVIDER,
         model: null,
-        retrievalScore: scored.score,
+        retrievalScore: chosen.score,
       });
     }
+
+    // Targets are processed in pool order, but a fallback anchor can score lower than the best one
+    // it could not use, so present the suggestions strongest-first (URL breaks ties).
+    outcome.suggestions.sort((a, b) => b.relevance_score - a.relevance_score || pyCompare(a.target_page_id, b.target_page_id));
 
     if (!request.dry_run) await this.repo.commit();
     logger.info(

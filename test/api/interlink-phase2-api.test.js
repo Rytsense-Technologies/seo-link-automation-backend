@@ -61,8 +61,10 @@ describe('analyze: generation modes', () => {
     const [top] = body.candidates;
     expect(Object.keys(top).sort()).toEqual(['retrieval_score', 'score', 'signals', 'target_page_id', 'target_url']);
     expect(Object.keys(top.signals).sort()).toEqual(
-      ['content_h1', 'content_title', 'h1_overlap', 'keyword_overlap', 'phrase_overlap', 'quality', 'region_language', 'slug_similarity', 'title_overlap'],
+      ['anchor_quality', 'content_h1', 'content_title', 'h1_overlap', 'keyword_overlap', 'phrase_overlap', 'quality', 'region_language', 'slug_similarity', 'title_overlap'],
     );
+    // The suggested anchors are the ones the scorer judged best for each target.
+    expect(top.signals.anchor_quality).toBeGreaterThan(0);
   });
 
   it('AI failure without ai_fallback keeps returning 502', async () => {
