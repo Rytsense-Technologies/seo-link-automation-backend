@@ -66,7 +66,9 @@ or were rejected within \`INTERLINK_REJECTION_COOLDOWN_DAYS\`, are not regenerat
 
 **Generation modes** (\`generation_mode\` in the response):
 - \`ai\` (default): the AI judges only the retrieved candidate pool. AI unavailable -> 503,
-  AI failure / invalid output -> 502.
+  AI failure / invalid output -> 502. When \`AI_FALLBACK_PROVIDER\` is configured (e.g. Groq),
+  that provider is tried once if the primary one fails, before any error is returned; the
+  suggestion records which provider answered.
 - \`deterministic\` (\`use_ai: false\`): no AI call. Targets are ranked by explainable signals
   (see \`candidates[].signals\`), and a link is proposed only where a phrase from the target's
   title/H1/keywords already appears in a source sentence (skip reason \`NO_ANCHOR_IN_SOURCE\`

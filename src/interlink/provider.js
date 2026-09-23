@@ -115,24 +115,51 @@ async function loadProviderClasses() {
   return providerClasses;
 }
 
-export async function buildAiProvider(settings, { fetchImpl } = {}) {
-  const ProviderClass = (await loadProviderClasses())[settings.ai_provider];
-  if (!ProviderClass || settings.ai_api_key === null || settings.ai_api_key === undefined) {
-    throw new ServiceUnavailableError('No AI provider is configured (set AI_PROVIDER and AI_API_KEY)', {
-      code: 'AI_PROVIDER_NOT_CONFIGURED',
-    });
-  }
+async function buildProvider(settings, { name, apiKey, model, baseUrl, fetchImpl }) {
+  const ProviderClass = (await loadProviderClasses())[name];
+  if (!ProviderClass || apiKey === null || apiKey === undefined) return null;
   return new ProviderClass({
-    apiKey: settings.ai_api_key,
-    model: settings.ai_model || ProviderClass.DEFAULT_MODEL,
-    baseUrl: settings.ai_base_url || ProviderClass.DEFAULT_BASE_URL,
+    apiKey,
+    model: model || ProviderClass.DEFAULT_MODEL,
+    baseUrl: baseUrl || ProviderClass.DEFAULT_BASE_URL,
     timeout: settings.ai_timeout_seconds,
     temperature: settings.ai_temperature,
     ...(fetchImpl ? { fetchImpl } : {}),
   });
 }
 
+export async function buildAiProvider(settings, { fetchImpl } = {}) {
+  const provider = await buildProvider(settings, {
+    name: settings.ai_provider,
+    apiKey: settings.ai_api_key,
+    model: settings.ai_model,
+    baseUrl: settings.ai_base_url,
+    fetchImpl,
+  });
+  if (provider === null) {
+    throw new ServiceUnavailableError('No AI provider is configured (set AI_PROVIDER and AI_API_KEY)', {
+      code: 'AI_PROVIDER_NOT_CONFIGURED',
+    });
+  }
+  return provider;
+}
+
+/**
+ * The optional secondary provider (AI_FALLBACK_PROVIDER/_API_KEY), or null when it is not
+ * configured. It is tried once after the primary provider fails; see FallbackRelevanceAnalyzer.
+ */
+export async function buildFallbackAiProvider(settings, { fetchImpl } = {}) {
+  return buildProvider(settings, {
+    name: settings.ai_fallback_provider,
+    apiKey: settings.ai_fallback_api_key,
+    model: settings.ai_fallback_model,
+    baseUrl: settings.ai_fallback_base_url,
+    fetchImpl,
+  });
+}
+
 let cachedProvider = null;
+let cachedFallbackProvider = null;
 
 /** Shared provider (like the lru_cached factory); failures are not cached. */
 export async function getAiProvider(settings) {
@@ -140,6 +167,13 @@ export async function getAiProvider(settings) {
   return cachedProvider;
 }
 
+/** Shared secondary provider, or null when none is configured. */
+export async function getFallbackAiProvider(settings) {
+  if (cachedFallbackProvider === null) cachedFallbackProvider = await buildFallbackAiProvider(settings);
+  return cachedFallbackProvider;
+}
+
 export function resetAiProviderCache() {
   cachedProvider = null;
+  cachedFallbackProvider = null;
 }

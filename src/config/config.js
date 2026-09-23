@@ -43,6 +43,13 @@ const FIELDS = {
   ai_timeout_seconds: ['float', 60.0],
   ai_temperature: ['float', 0.2],
 
+  // Secondary AI provider, tried once when the primary one fails (e.g. Gemini 503 -> Groq).
+  // "none" (or a missing key) disables it; timeout/temperature are shared with the primary.
+  ai_fallback_provider: ['enum', 'none', { values: PROVIDERS }],
+  ai_fallback_api_key: ['secret', null],
+  ai_fallback_model: ['optstr', null],
+  ai_fallback_base_url: ['optstr', null],
+
   interlink_min_relevance_score: ['int', 70, { ge: 0, le: 100 }],
   interlink_candidate_pool_size: ['int', 15, { ge: 1, le: 50 }],
   interlink_max_suggestions_per_page: ['int', 5, { ge: 1, le: 50 }],

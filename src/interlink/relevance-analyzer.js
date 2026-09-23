@@ -193,6 +193,53 @@ export class RelevanceAnalyzer {
   }
 }
 
+/**
+ * Tries each analyzer in order and returns the first successful analysis (e.g. Gemini, then Groq
+ * when Gemini answers "503 high demand"). Each provider is called at most once per analysis: this
+ * is a provider fallback, not a retry. Only AI provider failures (transport, HTTP error status,
+ * invalid output) move on to the next provider; anything else propagates immediately, and the
+ * last provider's error is raised when they all fail, so the existing 502 behaviour is unchanged.
+ *
+ * `providerName` / `modelName` report the provider that actually produced the analysis, so every
+ * stored suggestion records where it came from.
+ */
+export class FallbackRelevanceAnalyzer {
+  constructor(analyzers) {
+    if (!analyzers.length) throw new Error('FallbackRelevanceAnalyzer needs at least one analyzer');
+    this.analyzers = analyzers;
+    this.active = analyzers[0];
+  }
+
+  get providerName() {
+    return this.active.providerName;
+  }
+
+  get modelName() {
+    return this.active.modelName;
+  }
+
+  buildPrompt(args) {
+    // All analyzers share the same prompt limits, so the payload is built once.
+    return this.analyzers[0].buildPrompt(args);
+  }
+
+  async analyze(prompt, candidates) {
+    for (const [index, analyzer] of this.analyzers.entries()) {
+      this.active = analyzer;
+      try {
+        return await analyzer.analyze(prompt, candidates);
+      } catch (err) {
+        const last = index === this.analyzers.length - 1;
+        if (last || !(err instanceof AIProviderError)) throw err;
+        const next = this.analyzers[index + 1];
+        logger.warn(`${analyzer.providerName} failed (${err.message}); trying ${next.providerName}`);
+      }
+    }
+    /* c8 ignore next */
+    throw new AIProviderError('No AI provider produced an analysis');
+  }
+}
+
 const absolutise = (url, reference) => normalizeUrl(url, reference) || url;
 
 /** Validate the model output item-by-item against the candidate set. */
