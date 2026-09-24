@@ -4,6 +4,7 @@
  * Only routes that need no database are exercised (the pool stays lazy).
  */
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import handler, { getApp } from '../../api/index.js';
 
@@ -65,6 +66,48 @@ describe('vercel handler', () => {
     });
     expect(response.status).toBe(422);
     expect((await response.json()).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  it('preserves query strings through the adapter', async () => {
+    // A real /api route: the querystring reaches Fastify's validation (page must be >= 1).
+    const rejected = await fetch(`${baseUrl}/api/interlink/suggestions?page=0&page_size=5`);
+    expect(rejected.status).toBe(422);
+    const errors = (await rejected.json()).error.details.errors;
+    expect(errors.some((e) => e.loc.includes('page'))).toBe(true);
+    // And a query string on a route that answers 200 does not disturb it.
+    expect((await fetch(`${baseUrl}/openapi.json?cacheBust=1`)).status).toBe(200);
+  });
+
+  it('passes well-formed JSON bodies through to route validation', async () => {
+    const response = await fetch(`${baseUrl}/api/sites/00000000-0000-0000-0000-000000000000/pages`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pages: [] }),
+    });
+    // The body was parsed and validated (an empty list is rejected), so it survived the adapter.
+    expect(response.status).toBe(422);
+    const body = await response.json();
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+    expect(JSON.stringify(body.error.details.errors)).toContain('pages');
+  });
+
+  it('preserves response status and headers', async () => {
+    const ok = await fetch(`${baseUrl}/health`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get('content-type')).toBe('application/json');
+    const missing = await fetch(`${baseUrl}/api/nope`);
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get('content-type')).toBe('application/json');
+  });
+
+  it('serves the swagger-ui assets the deployment must ship', async () => {
+    // /docs needs @fastify/swagger-ui's static files; missing them breaks buildApp entirely,
+    // which is why vercel.json lists them under includeFiles.
+    const docs = await fetch(`${baseUrl}/docs`);
+    expect(docs.status).toBe(200);
+    expect(docs.headers.get('content-type')).toContain('text/html');
+    const vercelConfig = JSON.parse(readFileSync(new URL('../../vercel.json', import.meta.url), 'utf8'));
+    expect(vercelConfig.functions['api/index.js'].includeFiles).toContain('@fastify/swagger-ui/static');
   });
 
   it('keeps the documented API surface reachable', async () => {

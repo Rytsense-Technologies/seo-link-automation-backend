@@ -38,9 +38,15 @@ export default async function handler(request, response) {
   try {
     app = await getApp();
   } catch (error) {
-    // Configuration problems (e.g. a missing DATABASE_URL) surface here. The message may name the
-    // setting but never its value, so nothing secret reaches the response or the logs.
-    console.error(`Server initialisation failed: ${error instanceof Error ? error.message : String(error)}`);
+    // Startup problems (an invalid setting, a file the deployment did not ship) surface here.
+    // The reason goes to the platform log only - the response stays generic - and the stack is
+    // included because this is the one failure a deployment cannot diagnose from the outside.
+    if (error instanceof Error) {
+      console.error(`Server initialisation failed: ${error.name}: ${error.message}`);
+      if (error.stack) console.error(error.stack);
+    } else {
+      console.error(`Server initialisation failed: ${String(error)}`);
+    }
     response.statusCode = 500;
     response.setHeader('content-type', 'application/json');
     response.end(
