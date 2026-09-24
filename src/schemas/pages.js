@@ -136,4 +136,18 @@ export const PageList = {
   required: ['items', 'total', 'page', 'page_size'],
 };
 
-export const pageSchemas = [SiteCreate, SiteRead, PageUpsert, PageBulkUpsert, PageBulkUpsertResult, PageSummary, PageRead, PageDetail, PageList];
+export const PageResolution = {
+  $id: 'PageResolution',
+  type: 'object',
+  description: 'The indexed page a URL refers to, and the site it belongs to.',
+  properties: {
+    site: { $ref: 'SiteRead#' },
+    page: { $ref: 'PageRead#' },
+  },
+  required: ['site', 'page'],
+};
+
+export const pageSchemas = [
+  SiteCreate, SiteRead, PageUpsert, PageBulkUpsert, PageBulkUpsertResult, PageSummary, PageRead, PageDetail, PageList,
+  PageResolution,
+];

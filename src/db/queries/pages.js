@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { getPool, runQuery } from '../pool.js';
 import { ConflictError, DatabaseError, NotFoundError, UnprocessableError } from '../../utils/errors.js';
 import { normalizeUrl, sameHost } from '../../utils/urls.js';
+import { urlsplit, urlunsplit } from '../../utils/pyurl.js';
+import { normalizeCrawlUrl } from '../../crawler/urls.js';
 import { pyStrip, pySortedUnique } from '../../utils/pytext.js';
 import { internalLinksFor } from '../../content/store.js';
 import { logger } from '../../utils/logger.js';
@@ -18,6 +20,36 @@ const UPSERT_COLUMNS = [
   'http_status', 'redirect_url', 'is_indexable', 'has_noindex', 'language', 'region', 'page_type',
   'keywords', 'outgoing_links', 'last_crawled_at',
 ];
+
+/**
+ * The stored-URL forms a reviewer's URL may correspond to, best match first: the crawler's form
+ * (tracking parameters removed, query sorted) and the plain normalised form, each with and without
+ * a trailing slash, `www.` and either scheme - the variations `urlKey` treats as the same page.
+ * Returns [] when the input is not an absolute http(s) URL. Nothing is fetched.
+ */
+export function pageUrlCandidates(rawUrl) {
+  let bases;
+  try {
+    bases = [normalizeCrawlUrl(rawUrl), normalizeUrl(rawUrl)].filter(Boolean);
+  } catch {
+    return []; // malformed netloc
+  }
+  const candidates = new Set();
+  for (const base of bases) {
+    const parts = urlsplit(base);
+    const bareHost = parts.netloc.startsWith('www.') ? parts.netloc.slice(4) : parts.netloc;
+    const trimmed = parts.path.replace(/\/+$/, '');
+    const paths = trimmed ? [parts.path, trimmed === parts.path ? `${trimmed}/` : trimmed] : ['/'];
+    const schemes = [parts.scheme, parts.scheme === 'https' ? 'http' : 'https'];
+    const netlocs = [parts.netloc, bareHost === parts.netloc ? `www.${bareHost}` : bareHost];
+    for (const path of paths) {
+      for (const netloc of netlocs) {
+        for (const scheme of schemes) candidates.add(urlunsplit([scheme, netloc, path, parts.query, '']));
+      }
+    }
+  }
+  return [...candidates];
+}
 
 export class PageService {
   /** @param executor pg Pool or client */
@@ -152,6 +184,48 @@ export class PageService {
       [...params, (page - 1) * pageSize, pageSize],
     );
     return [rows, countRows[0].total];
+  }
+
+  /**
+   * The site(s) a URL typed by a reviewer belongs to, by host (or `siteId`, when given), plus the
+   * stored-URL forms to look it up by. Read-only.
+   * Errors: 422 INVALID_PAGE_URL (not absolute http(s), or not on `siteId`), 404 SITE_NOT_FOUND.
+   */
+  async siteForUrl(rawUrl, { siteId = null } = {}) {
+    const candidates = pageUrlCandidates(rawUrl);
+    if (!candidates.length) {
+      throw new UnprocessableError(`URL is not an absolute http(s) URL: ${rawUrl}`, { code: 'INVALID_PAGE_URL' });
+    }
+    const [url] = candidates;
+    const sites = siteId === null ? await this.listSites() : [await this.getSite(siteId)];
+    const matching = sites.filter((site) => sameHost(url, site.base_url));
+    if (!matching.length) {
+      if (siteId !== null) {
+        throw new UnprocessableError(`URL is not an internal http(s) URL of this site: ${rawUrl}`, {
+          code: 'INVALID_PAGE_URL',
+        });
+      }
+      throw new NotFoundError('No indexed website matches this URL', { code: 'SITE_NOT_FOUND' });
+    }
+    return { url, candidates, sites: matching };
+  }
+
+  /**
+   * Finds the indexed page for a URL a reviewer typed, so clients never need page ids up front.
+   * The site is the one whose host the URL is on (or `siteId`, when given). Read-only: the URL
+   * is only compared with stored URLs, never requested.
+   */
+  async resolvePage(rawUrl, { siteId = null } = {}) {
+    const { candidates, sites } = await this.siteForUrl(rawUrl, { siteId });
+    const { rows } = await runQuery(
+      this.executor,
+      `SELECT ${PAGE_COLUMNS_NO_CONTENT} FROM pages WHERE site_id = ANY($1::uuid[]) AND url = ANY($2::text[])`,
+      [sites.map((site) => site.id), candidates],
+    );
+    if (!rows.length) throw new NotFoundError('Page not found in the indexed website', { code: 'PAGE_NOT_FOUND' });
+    const rank = (row) => candidates.indexOf(row.url);
+    const page = rows.reduce((best, row) => (rank(row) < rank(best) ? row : best));
+    return { site: sites.find((site) => site.id === page.site_id), page };
   }
 
   async getPage(pageId) {
