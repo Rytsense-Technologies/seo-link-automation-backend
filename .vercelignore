@@ -1,0 +1,26 @@
+# What the Vercel deployment does not need. Nothing here is removed from the repository:
+# the Python/FastAPI implementation stays as the behavioural reference for the Node port.
+
+# Python reference implementation and its tooling. These files at the repository root are what
+# make Vercel detect a Python project and install fastapi/alembic/sqlalchemy/uvicorn on every
+# build; the serverless function is Node.js only and never loads them.
+app/
+alembic/
+alembic.ini
+tests/
+requirements.txt
+requirements-dev.txt
+pyproject.toml
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node tooling and tests: used in CI and locally, not at runtime by the function.
+test/
+vitest.config.js
+eslint.config.js
+
+# Documentation
+*.md
